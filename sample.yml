@@ -1,0 +1,420 @@
+---
+#
+# Custom CloudFormation template
+#
+Description: CloudFormation template for Custom EC2.
+#
+# AWSTemplateFormatVersion
+#
+# The version of the schema used for CloudFormation. This should virtually never
+# need to change.
+#
+AWSTemplateFormatVersion: '2010-09-09'
+
+#
+# Functions
+#
+# Template values can be dynamically calculated via the use of functions.
+#
+# @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/intrinsic-function-reference.html
+#
+# Common functions used in this template:
+#
+# - 'Fn::GetAtt': [ 'ResourceName', 'PropertyName' ]
+#   Similar to Ref, this replaces the current value with the value of a property
+#   either defined within the template or by Amazon itself.
+#
+# - 'Fn::FindInMap': [ 'MappingName', 'KeyName', 'PropertyName' ]
+#   Replaces the current value with the value found within a mapping, defined
+#   later within the mappings section. This allows dynamically changing the
+#   value based on the stack's environment, like which account or region it's
+#   launched in.
+#
+# - 'Fn::Sub': 'String'
+#    Replaces a tokenized string with a dynamically-generated value, similar to
+#    PHP's strtr(). Tokens are defined as ${ResourceName}, which works like Ref
+#    above, or ${ResourceName.PropertyName}, which works like Fn::GetAtt above.
+Parameters:
+  ArtifactBucket:
+    Type: String
+    Default: custom-bucket
+    Description: The S3 bucket that contains the build artifacts that CodeDeploy will deploy.
+  AvailabilityZone1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1d
+  AvailabilityZone2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1b
+  DesiredCapacity:
+    Type: Number
+    Default: '1'
+    Description: The desired number of EC2 instances used for the application.
+
+
+  Environment:
+    Description: The short name of the environment associated with the stack. Deprecated.
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+
+  RemoteAccessCidr:
+    Description: The IPv4 CIDR to allow remote SSH access to Sample proxy instances.
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[1-2][0-9]|3[0-2]))?$'
+    ConstraintDescription: The value provided is not a valid IPv4 CIDR.
+
+Outputs:
+  SampleURL:
+    Description: The URL of the Custom proxy load balancer.
+    Value:
+      'Fn::Sub': ''
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMI: ami-07d0cf3af28718ef8
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.176.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:
+          Ref: AWS::StackName
+  RouteTableProxy:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  SubnetSampleProxyZoneA:
+    Type: AWS::EC2::Subnet
+    DependsOn: SecurityGroupTestProxy
+    Properties:
+      CidrBlock: 10.176.10.0/26
+      AvailabilityZone:
+        Ref: AvailabilityZone1
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+  SubnetRouteTableAssociationSampleZoneA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - RouteTableProxy
+      - SubnetSampleProxyZoneA
+    Properties:
+      RouteTableId:
+          Ref: RouteTableProxy
+      SubnetId:
+        Ref: SubnetSampleProxyZoneA
+  SubnetSampleProxyZoneB:
+    Type: AWS::EC2::Subnet
+    DependsOn: SecurityGroupTestProxy
+    Properties:
+      AvailabilityZone:
+        Ref: AvailabilityZone2
+      CidrBlock: 10.176.10.64/26
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+  SubnetRouteTableAssociationSampleZoneB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - RouteTableProxy
+      - SubnetSampleProxyZoneB
+    Properties:
+      RouteTableId:
+        Ref: RouteTableProxy
+      SubnetId:
+        Ref: SubnetSampleProxyZoneB
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Ref: AWS::StackName
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: InternetGateway
+      VpcId:
+        Ref: VPC
+  route1:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId:
+        Ref: RouteTableProxy
+      GatewayId:
+          Ref: InternetGateway
+  DHCPOptions:
+    Type: AWS::EC2::DHCPOptions
+    Properties:
+      DomainName: ec2.internal
+      DomainNameServers:
+        - AmazonProvidedDNS
+  DHCPOptionsAssociationVPC:
+    Type: AWS::EC2::VPCDHCPOptionsAssociation
+    Properties:
+      VpcId:
+        Ref: VPC
+      DhcpOptionsId:
+        Ref: DHCPOptions
+  NetworkAclTestProxy:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId:
+        Ref: VPC
+  OutboundNetworkAclTestProxy:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAclTestProxy
+      Protocol: '-1' # -1 = all protocols
+      RuleAction: allow
+      RuleNumber: 100 # arbitrary rule weight
+  InboundNetworkAclTestProxy:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId:
+        Ref: NetworkAclTestProxy
+      Protocol: '-1' # -1 = all protocols
+      RuleAction: allow
+      RuleNumber: 100 # arbitrary rule weight
+  SubnetANetworkAclAssociationTestProxy:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    DependsOn:
+      - NetworkAclTestProxy
+      - SubnetSampleProxyZoneA
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAclTestProxy
+      SubnetId:
+        Ref: SubnetSampleProxyZoneA
+  SubnetBNetworkAclAssociationTestProxy:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    DependsOn:
+      - NetworkAclTestProxy
+      - SubnetSampleProxyZoneB
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAclTestProxy
+      SubnetId:
+        Ref: SubnetSampleProxyZoneB
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+  SecurityGroupTestProxyELB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Ref: VPC
+      GroupDescription: SecurityGroupTestElb
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1 # -1 = Access on all ports and protocols
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+  ELBTestProxy:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    DependsOn:
+      - VPCGatewayAttachment
+      - SubnetSampleProxyZoneA
+      - SubnetSampleProxyZoneB
+    Properties:
+      Subnets:
+        - Ref: SubnetSampleProxyZoneA
+        - Ref: SubnetSampleProxyZoneB
+      HealthCheck:
+        # Instances are considered unhealthy if they don't respond on the Sample
+        # proxy port after 5 seconds more than 2 times in a row. The check is
+        # done every 30 seconds. Unhealthy instances can become healthy again
+        # if they pass the check 10 times in a row.
+        HealthyThreshold: 10
+        Interval: 30
+        Target: 'HTTP:80/'
+        Timeout: 15
+        UnhealthyThreshold: 2
+      ConnectionDrainingPolicy:
+        Enabled: true
+        Timeout: 300
+      ConnectionSettings:
+        IdleTimeout: 60
+      CrossZone: true
+      SecurityGroups:
+        - Ref: SecurityGroupTestProxyELB
+      Listeners:
+        - InstancePort: 80
+          InstanceProtocol: HTTP
+          LoadBalancerPort: 80
+          Protocol: HTTP
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ArtifactAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: ArtifactBucket
+                - "/*"
+
+      - PolicyName: ElbAutoDrainAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - elasticloadbalancing:Describe*
+            - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+            - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+            - autoscaling:Describe*
+            - autoscaling:EnterStandby
+            - autoscaling:ExitStandby
+            - autoscaling:UpdateAutoScalingGroup
+            Resource: "*"
+
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: Role
+  SecurityGroupTestProxy:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Sample proxy security group'
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+  #      - IpProtocol: tcp
+  #        FromPort: 443
+  #        ToPort: 443
+  #        SourceSecurityGroupId:
+  #          Ref: SecurityGroupTestProxyELB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: RemoteAccessCidr
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Ref: RemoteAccessCidr
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: "-1"
+        ToPort: "-1"
+        CidrIp: 0.0.0.0/0
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      LaunchConfigurationName: CustomLaunchConfig
+      AssociatePublicIpAddress: true
+      ImageId:
+        Fn::FindInMap:
+        - RegionMap
+        - Ref: AWS::Region
+        - AMI
+      IamInstanceProfile:
+        Ref: InstanceProfile
+      InstanceType: t2.micro
+      SecurityGroups:
+      - Ref: SecurityGroupTestProxy
+      BlockDeviceMappings:
+        - DeviceName: '/dev/sda1'
+          Ebs:
+            VolumeSize: 10
+      KeyName: Newone
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - "\n"
+          - - "#!/bin/bash -v"
+            - sudo apt-get -y update
+            - sudo apt-get -y install curl git python-pip python-setuptools python zip apache2 php
+            - sudo service apache2 restart
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+    - VPCGatewayAttachment
+    Properties:
+      AvailabilityZones:
+      - Ref: AvailabilityZone1
+      - Ref: AvailabilityZone2
+      DesiredCapacity:
+        Ref: DesiredCapacity
+      HealthCheckGracePeriod: '900'
+      HealthCheckType: ELB
+      LaunchConfigurationName:
+        Ref: LaunchConfiguration
+      LoadBalancerNames:
+      - Ref: ELBTestProxy
+      MaxSize: 3
+      MinSize:
+        Ref: DesiredCapacity
+      TerminationPolicies:
+      - OldestLaunchConfiguration
+      VPCZoneIdentifier:
+      - Ref: SubnetSampleProxyZoneA
+      - Ref: SubnetSampleProxyZoneB
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: '1'
+        MinInstancesInService:
+        - Ref: DesiredCapacity

@@ -1,0 +1,505 @@
+---
+#
+# 1 Test CloudFormation template
+#
+# This defines the infrastructure used to create a 1 Test stack. Stack creation
+# itself is handled via a deployment tool, Moonshot.
+#
+#
+#
+Description: CloudFormation template for 1 Test, the 1 notification system.
+#
+# AWSTemplateFormatVersion
+#
+# The version of the schema used for CloudFormation. This should virtually never
+# need to change.
+#
+AWSTemplateFormatVersion: '2010-09-09'
+#
+# Functions
+#
+# Template values can be dynamically calculated via the use of functions.
+#
+# @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/intrinsic-function-reference.html
+#
+# Common functions used in this template:
+#
+# - 'Fn::GetAtt': [ 'ResourceName', 'PropertyName' ]
+#   Similar to Ref, this replaces the current value with the value of a property
+#   either defined within the template or by Amazon itself.
+#
+# - 'Fn::FindInMap': [ 'MappingName', 'KeyName', 'PropertyName' ]
+#   Replaces the current value with the value found within a mapping, defined
+#   later within the mappings section. This allows dynamically changing the
+#   value based on the stack's environment, like which account or region it's
+#   launched in.
+#
+# - 'Fn::Sub': 'String'
+#    Replaces a tokenized string with a dynamically-generated value, similar to
+#    PHP's strtr(). Tokens are defined as ${ResourceName}, which works like Ref
+#    above, or ${ResourceName.PropertyName}, which works like Fn::GetAtt above.
+#
+# Note: the Ruby AWS SDK does not support short form functions correctly at this
+# time, causing Moonshot to generate incorrect changesets when used. Long form
+# functions must be used until this is fixed.
+#
+Parameters:
+  AvailabilityZone1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1d
+  AvailabilityZone2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1b
+  DesiredCapacity:
+    Type: Number
+    Default: '2'
+    Description: The desired number of EC2 instances used for the application
+  Environment:
+    Description: The short name of the environment associated with the stack. Deprecated.
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - stg
+      - prod
+      - scrubbed
+Mappings:
+  RegionMap:
+     us-east-1:
+     AMI: ami-026c8acd92718196b
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.176.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:
+          Ref: AWS::StackName
+  #
+  # Defines the route table for the Test VPC.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route-table.html
+  # @see http://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/VPC_Route_Tables.html
+  #
+RouteTableProxy:
+  Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+         Ref: VPC
+  #
+  # Defines the subnet for Test to exist within the first availability zone (AZ).
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+  #
+  SubnetTestProxyZoneA:
+    Type: AWS::EC2::Subnet
+    DependsOn: SecurityGroup1TestProxy
+    Properties:
+      CidrBlock: 10.176.10.0/26
+      AvailabilityZone:
+         Ref: AvailabilityZone1
+      VpcId:
+        Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+             Ref: AWS::StackName
+  #
+  # Associates the subnet for the first AZ defined above to the VPC and its route table.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+  #
+  SubnetRouteTableAssociationTestZoneA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - RouteTableProxy
+      - SubnetTestProxyZoneA
+    Properties:
+      RouteTableId:
+        Ref: RouteTableProxy
+      SubnetId:
+        Ref: SubnetTestProxyZoneA
+  #
+  # Defines the subnet for Test to exist within the second AZ.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+  #
+  SubnetTestProxyZoneB:
+    Type: AWS::EC2::Subnet
+    DependsOn: SecurityGroup1TestProxy
+    Properties:
+      AvailabilityZone:
+         Ref: AvailabilityZone2
+      CidrBlock: 10.176.10.64/26
+      VpcId:
+         Ref: VPC
+      Tags:
+        - Key: Name
+          Value:
+             Ref: AWS::StackName
+
+  #
+  # Associates the subnet for the second AZ defined above to the VPC and its route table.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-route-table-assoc.html
+  #
+  SubnetRouteTableAssociationTestZoneB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - RouteTableProxy
+      - SubnetTestProxyZoneB
+    Properties:
+      RouteTableId:
+         Ref: RouteTableProxy
+      SubnetId:
+         Ref: SubnetTestProxyZoneB
+  #
+  # Defines the internet gateway for the Test VPC.
+  #
+  # Internet gateways allow resources within a VPC to talk to the external world.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-internet-gateway.html
+  #
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+             Ref: AWS::StackName
+
+  #
+  # Attaches the internet gateway defined above to the Test VPC.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc-gateway-attachment.html
+  #
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+         Ref: InternetGateway
+      VpcId:
+         Ref: VPC
+  #
+  # Creates a route between the internet gateway and the VPC's route table.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route.html
+  #
+  route1:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId:
+         Ref: RouteTableProxy
+      GatewayId:
+          Ref: InternetGateway
+  #
+  # Security and ACL resources
+  #
+  # These resources define the level of access the external world has to the
+  # resources and networks within the stack. For example, these resources define
+  # the ports and IP subnets resources within the stack will respond to.
+  #
+  # @see http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/using-network-security.html
+  # @see http://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/VPC_ACLs.html
+  #
+
+  #
+  # Defines the access control list for the Test stack's network.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl.html
+  #
+  NetworkAcl1TestProxy:
+     Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId:
+         Ref: VPC
+
+  #
+  # Defines the outbound network ACL rules for the Test stack.
+  #
+  # Effectively, all outbound network traffic is allowed.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl-entry.html
+  #
+  OutboundNetworkAcl1TestProxy:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId:
+        Ref: NetworkAcl1TestProxy
+      Protocol: '-1' # -1 = all protocols
+      RuleAction: allow
+      RuleNumber: 100 # arbitrary rule weight
+
+  #
+  # Defines the inbound network ACL rules for the Test stack.
+  #
+  # Effectively, all inbound network traffic is allowed. Access to specific
+  # resources is defined at the application level via security groups instead.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-network-acl-entry.html
+  #
+  InboundNetworkAcl1TestProxy:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId:
+        Ref: NetworkAcl1TestProxy
+      Protocol: '-1' # -1 = all protocols
+      RuleAction: allow
+      RuleNumber: 100 # arbitrary rule weight
+  #
+  # Associates the network ACL defined above with the first AZ's subnet.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-network-acl-assoc.html
+  #
+  SubnetANetworkAclAssociation1TestProxy:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    DependsOn:
+      - NetworkAcl1TestProxy
+      - SubnetTestProxyZoneA
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAcl1TestProxy
+      SubnetId:
+        Ref: SubnetTestProxyZoneA
+  #
+  # Associates the network ACL defined above with the first AZ's subnet.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet-network-acl-assoc.html
+  #
+  SubnetBNetworkAclAssociation1TestProxy:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    DependsOn:
+      - NetworkAcl1TestProxy
+      - SubnetTestProxyZoneB
+    Properties:
+      NetworkAclId:
+        Ref: NetworkAcl1TestProxy
+      SubnetId:
+        Ref: SubnetTestProxyZoneB
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+
+  SecurityGroup1TestProxyELB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Ref: VPC
+      GroupDescription: SecurityGroup1TestElb
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1 # -1 = Access on all ports and protocols
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+  #
+  # Defines the load balancer (ELB) in front of the Test proxy EC2 instances.
+  #
+  # Typical of load balancers, most of the properties define the ELB's ability
+  # to monitor the EC2 instances it fronts.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-elb.html
+  #
+  Sample:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    DependsOn:
+      - VPCGatewayAttachment
+      - SubnetTestProxyZoneA
+      - SubnetTestProxyZoneB
+    Properties:
+      Subnets:
+        - Ref: SubnetTestProxyZoneA
+        - Ref: SubnetTestProxyZoneB
+      HealthCheck:
+        # Instances are considered unhealthy if they don't respond on the Test
+        # proxy port after 5 seconds more than 2 times in a row. The check is
+        # done every 30 seconds. Unhealthy instances can become healthy again
+        # if they pass the check 10 times in a row.
+        HealthyThreshold: 10
+        Interval: 30
+        Target: 'HTTP:80/'
+        Timeout: 15
+        UnhealthyThreshold: 2
+      ConnectionDrainingPolicy:
+        Enabled: true
+        Timeout: 300
+      ConnectionSettings:
+        IdleTimeout: 60
+      CrossZone: true
+      SecurityGroups:
+        - Ref: SecurityGroup1TestProxyELB
+      Listeners:
+        - InstancePort: 80
+          InstanceProtocol: HTTP
+          LoadBalancerPort: 443
+          Protocol: HTTPS
+          SSLCertificateId:
+            Ref: TestSslCertArn
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+
+
+      - PolicyName: ElbAutoDrainAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - elasticloadbalancing:Describe*
+            - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+            - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+            - autoscaling:Describe*
+            - autoscaling:EnterStandby
+            - autoscaling:ExitStandby
+            - autoscaling:UpdateAutoScalingGroup
+            Resource: "*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: Role
+
+  #
+  # Defines the access rules, at an application level, for the Test EC2 instances.
+  #
+  # Effectively allows all outbound traffic, but only allows inbound SSH
+  # traffic. The EC2 instances will receive inbound HTTP(S) traffic from the
+  # load balancer.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group.html
+  #
+  SecurityGroup1TestProxy:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Test proxy security group'
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId:
+            Ref: SecurityGroup1TestProxyELB
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: RemoteAccessCidr
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Ref: RemoteAccessCidr
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: "-1"
+        ToPort: "-1"
+        CidrIp: 0.0.0.0/0
+
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: true
+      ImageId:
+        Fn::FindInMap:
+        - RegionMap
+        - Ref: AWS::Region
+        - AMI
+      IamInstanceProfile:
+        Ref: InstanceProfile
+      InstanceType: t2.micro
+      SecurityGroups:
+      - Ref: SecurityGroup1TestProxy
+      BlockDeviceMappings:
+        - DeviceName: '/dev/sda1'
+          Ebs:
+            VolumeSize: 20
+      KeyName: new2
+
+
+  #
+  # Auto-scaling application resources
+  #
+  # These resources define how resources that scale based on usage are created
+  # and destroyed.
+  #
+  # The primary mechanism for this is an auto-scaling group that defines the
+  # upper and lower bounds of the pool of resources. Additional policies define
+  # the conditions under which the pool is enlarged or shrunk, and alarms
+  # provide the data evaluated by the auto-scaling policies.
+  #
+
+  #
+  # Defines the auto-scaling group for the EC2 instances making up the Test proxy.
+  #
+  # @see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-as-group.html
+  #
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+    - VPCGatewayAttachment
+    Properties:
+      AvailabilityZones:
+      - Ref: AvailabilityZone1
+      - Ref: AvailabilityZone2
+      DesiredCapacity:
+        Ref: DesiredCapacity
+      HealthCheckGracePeriod: '900'
+      HealthCheckType: ELB
+      LaunchConfigurationName:
+        Ref: LaunchConfiguration
+      LoadBalancerNames:
+      - Ref: Sample
+      MaxSize: 2
+      MinSize:
+        Ref: DesiredCapacity
+      TerminationPolicies:
+      - OldestLaunchConfiguration
+      VPCZoneIdentifier:
+      - Ref: SubnetTestProxyZoneA
+      - Ref: SubnetTestProxyZoneB
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: '1'
+        MinInstancesInService:
+        - Ref: DesiredCapacity
